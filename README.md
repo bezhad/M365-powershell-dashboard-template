@@ -237,3 +237,11 @@ Make sure `staticwebapp.config.json` is in the repo.
 
 **Manual login option not showing**
 `usernameHash` and `passwordHash` are empty in `config.js`.
+
+## Example images:
+
+<img width="1048" height="627" alt="image" src="https://github.com/user-attachments/assets/aac31912-d1ca-4bab-b48d-98768613599e" />
+
+<img width="832" height="621" alt="image" src="https://github.com/user-attachments/assets/b006e36a-fed6-4666-8688-b52bcb534a0f" />
+
+
