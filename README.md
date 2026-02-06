@@ -90,7 +90,7 @@ const DASHBOARD_CONFIG = {
 
 ### Step 7: Customize commands
 
-Either edit `commands.json` directly, or use the admin editor:
+Either edit `commands.json` directly, or use the admin editor (recommended):
 
 1. Open `admin.html` locally in your browser
 2. Log in with the admin password (default: `admin123` — change it in the file)
