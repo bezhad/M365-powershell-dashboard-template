@@ -1,0 +1,8 @@
+{
+  "routes": [
+    {
+      "route": "/hash-generator.html",
+      "statusCode": 404
+    }
+  ]
+}

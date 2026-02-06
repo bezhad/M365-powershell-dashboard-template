@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SHA-256 Hash Generator - M365 Dashboard Setup</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #e2e8f0; display: flex; justify-content: center; padding: 40px 16px; margin: 0; min-height: 100vh; }
+    .container { max-width: 520px; width: 100%; }
+    h1 { font-size: 24px; margin: 0 0 4px; }
+    .subtitle { color: #94a3b8; font-size: 14px; margin-bottom: 24px; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+    label { display: block; font-size: 13px; color: #94a3b8; margin-bottom: 6px; }
+    input { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 8px; border: 1px solid #475569; background: #334155; color: white; font-size: 14px; outline: none; }
+    input:focus { border-color: #3b82f6; }
+    button { padding: 10px 20px; border-radius: 8px; border: none; background: #2563eb; color: white; font-weight: 600; cursor: pointer; width: 100%; font-size: 14px; margin-top: 12px; }
+    button:hover { background: #1d4ed8; }
+    .result { margin-top: 16px; padding: 12px; background: #0f172a; border-radius: 8px; word-break: break-all; font-family: monospace; font-size: 13px; color: #4ade80; border: 1px solid #334155; position: relative; }
+    .copy-btn { position: absolute; top: 8px; right: 8px; padding: 4px 10px; font-size: 12px; background: #334155; border: 1px solid #475569; border-radius: 6px; color: #94a3b8; cursor: pointer; font-family: system-ui; }
+    .copy-btn:hover { background: #475569; color: white; }
+    .copy-btn.copied { background: #166534; border-color: #22c55e; color: #4ade80; }
+    .help { margin-top: 24px; }
+    .help h2 { font-size: 16px; margin: 0 0 12px; color: #e2e8f0; }
+    .help-item { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 12px 14px; margin-bottom: 8px; }
+    .help-item .label { font-size: 13px; color: #e2e8f0; font-weight: 600; margin-bottom: 2px; }
+    .help-item .desc { font-size: 12px; color: #94a3b8; margin: 0; }
+    .note { font-size: 12px; color: #64748b; margin-top: 20px; text-align: center; line-height: 1.5; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>🔐 SHA-256 Hash Generator</h1>
+  <p class="subtitle">Generate hashes for config.js — no data leaves your browser.</p>
+
+  <div class="card">
+    <label for="input">Enter text to hash</label>
+    <input type="text" id="input" placeholder="e.g. tenant ID, email, username, or password">
+    <button onclick="generate()">Generate Hash</button>
+    <div id="output"></div>
+  </div>
+
+  <div class="help">
+    <h2>What to hash for config.js</h2>
+    <div class="help-item">
+      <div class="label">Tenant ID</div>
+      <p class="desc">Azure Portal → Entra ID → Overview → Tenant ID (a GUID like 30c196be-106b-...)</p>
+    </div>
+    <div class="help-item">
+      <div class="label">User Email</div>
+      <p class="desc">The exact email used to sign in with Microsoft (e.g. user@company.com)</p>
+    </div>
+    <div class="help-item">
+      <div class="label">Manual Login Username</div>
+      <p class="desc">Any username you choose for the non-SSO fallback login</p>
+    </div>
+    <div class="help-item">
+      <div class="label">Manual Login Password</div>
+      <p class="desc">Any password you choose for the non-SSO fallback login</p>
+    </div>
+  </div>
+
+  <p class="note">
+    This tool runs entirely in your browser using the Web Crypto API.<br>
+    No data is sent anywhere. Safe to use with sensitive values.
+  </p>
+</div>
+<script>
+async function generate() {
+  const val = document.getElementById('input').value.trim();
+  if (!val) return;
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(val));
+  const hash = [...new Uint8Array(buf)].map(x => x.toString(16).padStart(2,'0')).join('');
+  document.getElementById('output').innerHTML = `
+    <div class="result">
+      <span id="hashText">${hash}</span>
+      <button class="copy-btn" onclick="copyHash(this)">Copy</button>
+    </div>`;
+}
+
+function copyHash(btn) {
+  const hash = document.getElementById('hashText').textContent;
+  navigator.clipboard.writeText(hash);
+  btn.textContent = 'Copied!';
+  btn.classList.add('copied');
+  setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
+}
+
+document.getElementById('input').addEventListener('keydown', e => { if (e.key === 'Enter') generate(); });
+</script>
+</body>
+</html>

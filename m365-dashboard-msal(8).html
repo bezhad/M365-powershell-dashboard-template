@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>M365 PowerShell Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.3/lib/msal-browser.min.js"></script>
+  <script src="./config.js"></script>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; }
+    select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 0.75rem center; }
+  </style>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 p-4">
+  <div id="app" class="max-w-2xl mx-auto"></div>
+
+<script>
+// =====================================================================
+// Read config from config.js (DASHBOARD_CONFIG)
+// =====================================================================
+const CFG = typeof DASHBOARD_CONFIG !== 'undefined' ? DASHBOARD_CONFIG : null;
+
+if (!CFG) {
+  document.getElementById('app').innerHTML = `
+    <div class="flex items-center justify-center h-64"><div class="text-center">
+      <div class="text-red-400 mb-2">⚠️ Missing config.js</div>
+      <div class="text-slate-500 text-sm">Make sure config.js is in the same folder as index.html.</div>
+    </div></div>`;
+  throw new Error("config.js not loaded");
+}
+
+// =====================================================================
+// MSAL
+// =====================================================================
+let msalInstance = null;
+let currentAccount = null;
+let manualAccount = null;
+
+try {
+  msalInstance = new msal.PublicClientApplication({
+    auth: { clientId: CFG.clientId, authority: CFG.authority, redirectUri: CFG.redirectUri },
+    cache: { cacheLocation: "sessionStorage", storeAuthStateInCookie: false }
+  });
+} catch (e) { console.warn("MSAL init failed:", e.message); }
+
+// =====================================================================
+// STATE
+// =====================================================================
+let tasks = {};
+let conns = {};
+let state = {
+  service: '', task: '', params: {}, copied: false,
+  showConnect: false, loading: true, error: null,
+  authLoading: true, authError: null,
+  showManualLogin: false, manualLoginError: null
+};
+
+// =====================================================================
+// HASHING
+// =====================================================================
+async function sha256(str) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return [...new Uint8Array(buf)].map(x => x.toString(16).padStart(2,'0')).join('');
+}
+
+// =====================================================================
+// AUTH
+// =====================================================================
+function isLoggedIn() { return currentAccount || manualAccount; }
+function getDisplayName() {
+  if (manualAccount) return manualAccount.name;
+  return currentAccount?.name || currentAccount?.username || 'User';
+}
+function getDisplayEmail() {
+  if (manualAccount) return manualAccount.email;
+  return currentAccount?.username || '';
+}
+
+async function initAuth() {
+  if (!msalInstance) { state.authLoading = false; render(); return; }
+  try {
+    const resp = await msalInstance.handleRedirectPromise();
+    if (resp) currentAccount = resp.account;
+    else {
+      const accts = msalInstance.getAllAccounts();
+      if (accts.length > 0) currentAccount = accts[0];
+    }
+    if (currentAccount && !(await checkAccess(currentAccount))) {
+      state.authError = "Your account is not authorized to access this dashboard.";
+      currentAccount = null;
+      msalInstance.clearCache();
+    }
+  } catch (e) { state.authError = e.message; }
+  state.authLoading = false;
+  render();
+  if (isLoggedIn()) loadConfig();
+}
+
+async function checkAccess(account) {
+  if (!CFG.enforceWhitelist) return true;
+  if (CFG.allowedTenantHashes.length === 0 && CFG.allowedUserHashes.length === 0) return true;
+  const tHash = await sha256(account.tenantId || '');
+  if (CFG.allowedTenantHashes.includes(tHash)) return true;
+  const eHash = await sha256(account.username || '');
+  if (CFG.allowedUserHashes.includes(eHash)) return true;
+  return false;
+}
+
+async function msalLogin() {
+  if (!msalInstance) return;
+  state.authError = null;
+  try { await msalInstance.loginRedirect({ scopes: ["openid", "profile", "email"] }); }
+  catch (e) { state.authError = e.message; render(); }
+}
+
+async function msalLogout() {
+  if (!msalInstance) return;
+  try { await msalInstance.logoutRedirect({ postLogoutRedirectUri: CFG.redirectUri }); }
+  catch(_) { currentAccount = null; resetState(); render(); }
+}
+
+async function tryManualLogin() {
+  const usr = document.getElementById('manualUser').value.trim();
+  const pwd = document.getElementById('manualPass').value;
+  if (!usr || !pwd) { state.manualLoginError = "Enter both fields"; render(); return; }
+  const uHash = await sha256(usr);
+  const pHash = await sha256(pwd);
+  if (uHash === CFG.manualLogin.usernameHash && pHash === CFG.manualLogin.passwordHash) {
+    manualAccount = { name: usr, email: 'Local account' };
+    state.showManualLogin = false; state.manualLoginError = null; state.authError = null;
+    render(); loadConfig();
+  } else { state.manualLoginError = "Invalid username or password"; render(); }
+}
+
+function manualLogout() { manualAccount = null; resetState(); render(); }
+
+function resetState() {
+  tasks = {}; conns = {};
+  state = { service:'', task:'', params:{}, copied:false, showConnect:false, loading:true, error:null, authLoading:false, authError:null, showManualLogin:false, manualLoginError:null };
+}
+
+// =====================================================================
+// DASHBOARD
+// =====================================================================
+async function loadConfig() {
+  try {
+    const r = await fetch(CFG.commandsUrl + '?c=' + Date.now());
+    if (!r.ok) throw new Error('Failed to load config');
+    const cfg = await r.json();
+    tasks = cfg.tasks || {}; conns = cfg.connections || {};
+    state.service = Object.keys(tasks)[0] || '';
+    state.loading = false;
+  } catch (e) { state.error = e.message; state.loading = false; }
+  render();
+}
+
+// =====================================================================
+// RENDER
+// =====================================================================
+function render() {
+  const app = document.getElementById('app');
+  const brandName = CFG.companyName || 'M365 PowerShell';
+
+  if (state.authLoading) {
+    app.innerHTML = `<div class="flex items-center justify-center h-64"><div class="text-center"><div class="text-3xl mb-3">🔐</div><div class="text-slate-400">Checking authentication...</div></div></div>`;
+    return;
+  }
+
+  if (!isLoggedIn()) {
+    const hasManual = CFG.manualLogin.usernameHash && CFG.manualLogin.passwordHash;
+    app.innerHTML = `
+      <div class="flex items-center justify-center min-h-[70vh]">
+        <div class="bg-slate-800/60 backdrop-blur rounded-2xl border border-slate-700 p-8 w-full max-w-sm text-center">
+          <div class="text-4xl mb-3">⚡</div>
+          <h1 class="text-2xl font-bold text-white mb-2">${esc(brandName)}</h1>
+          <p class="text-slate-400 text-sm mb-6">Sign in to access the dashboard.</p>
+          ${state.authError ? `<div class="bg-red-500/10 border border-red-500/30 rounded-lg p-3 mb-4"><p class="text-red-400 text-sm">${esc(state.authError)}</p></div>` : ''}
+          <button onclick="msalLogin()" class="w-full flex items-center justify-center gap-3 bg-[#2f2f2f] hover:bg-[#3a3a3a] text-white font-medium py-3 px-4 rounded-lg transition-all border border-slate-600 hover:border-slate-500 mb-3">
+            <svg width="20" height="20" viewBox="0 0 21 21"><rect x="1" y="1" width="9" height="9" fill="#f25022"/><rect x="11" y="1" width="9" height="9" fill="#7fba00"/><rect x="1" y="11" width="9" height="9" fill="#00a4ef"/><rect x="11" y="11" width="9" height="9" fill="#ffb900"/></svg>
+            Sign in with Microsoft
+          </button>
+          ${hasManual ? `
+            ${!state.showManualLogin ? `
+              <button onclick="state.showManualLogin=true;render();setTimeout(()=>document.getElementById('manualUser')?.focus(),50)" class="w-full text-slate-400 hover:text-slate-300 text-sm py-2 transition-all">
+                Or sign in with username & password
+              </button>
+            ` : `
+              <div class="border-t border-slate-700 pt-4 mt-2 space-y-2">
+                ${state.manualLoginError ? `<p class="text-red-400 text-sm">${state.manualLoginError}</p>` : ''}
+                <input type="text" id="manualUser" placeholder="Username" class="w-full bg-slate-700 text-white rounded-lg px-3 py-2 border border-slate-600 focus:border-blue-500 focus:outline-none text-sm">
+                <input type="password" id="manualPass" placeholder="Password" onkeydown="if(event.key==='Enter')tryManualLogin()" class="w-full bg-slate-700 text-white rounded-lg px-3 py-2 border border-slate-600 focus:border-blue-500 focus:outline-none text-sm">
+                <button onclick="tryManualLogin()" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-medium py-2 rounded-lg text-sm">Sign in</button>
+              </div>
+            `}
+          ` : ''}
+          <p class="text-xs text-slate-500 mt-4">Only authorized accounts can access this dashboard.</p>
+        </div>
+      </div>`;
+    return;
+  }
+
+  if (state.loading && !state.error) {
+    app.innerHTML = `${renderHeader()}<div class="flex items-center justify-center h-48"><div class="text-slate-400">Loading commands...</div></div>`;
+    return;
+  }
+
+  if (state.error) {
+    app.innerHTML = `${renderHeader()}<div class="flex items-center justify-center h-48"><div class="text-center"><div class="text-red-400 mb-2">⚠️ Error loading commands</div><div class="text-slate-500 text-sm">${state.error}</div><button onclick="loadConfig()" class="mt-4 px-4 py-2 bg-slate-700 text-white rounded-lg hover:bg-slate-600">Retry</button></div></div>`;
+    return;
+  }
+
+  const svc = tasks[state.service];
+  const tsk = state.task && svc ? svc.tasks[state.task] : null;
+  let cmd = '';
+  if (tsk) {
+    cmd = tsk.cmd;
+    Object.entries(state.params).forEach(([k, v]) => { cmd = cmd.replaceAll(`{${k}}`, v || `{${k}}`); });
+  }
+
+  app.innerHTML = `
+    ${renderHeader()}
+
+    <div class="bg-slate-800/50 backdrop-blur rounded-xl p-4 border border-slate-700 mb-3">
+      <label class="block text-sm font-medium text-slate-300 mb-2">Service</label>
+      <div class="flex gap-2 mb-4 flex-wrap">
+        ${Object.entries(tasks).map(([k, v]) => `
+          <button onclick="selectService('${k}')" class="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${state.service === k ? 'bg-blue-600 text-white shadow-lg' : 'bg-slate-700 text-slate-300 hover:bg-slate-600'}">
+            ${v.icon || '📁'} ${v.name}
+          </button>
+        `).join('')}
+      </div>
+
+      <label class="block text-sm font-medium text-slate-300 mb-2">Task</label>
+      <div class="mb-4">
+        <select onchange="selectTask(this.value)" class="w-full bg-slate-700 text-white rounded-lg px-3 py-2 appearance-none cursor-pointer border border-slate-600 focus:border-blue-500 focus:outline-none text-sm pr-10">
+          <option value="">Select a task...</option>
+          ${svc ? Object.entries(svc.tasks).map(([k, v]) => `<option value="${k}" ${state.task === k ? 'selected' : ''}>${v.name}</option>`).join('') : ''}
+        </select>
+      </div>
+
+      ${tsk && tsk.params.length > 0 ? `
+        <div class="border-t border-slate-700 pt-3">
+          <label class="block text-sm font-medium text-slate-300 mb-2">Parameters</label>
+          <div class="space-y-2">
+            ${tsk.params.map(p => `
+              <div>
+                <label class="block text-xs text-slate-400 mb-1">${p}</label>
+                <input type="text" placeholder="${p}" value="${state.params[p] || ''}" oninput="setParam('${p}', this.value)"
+                  class="w-full bg-slate-700 text-white rounded-lg px-3 py-2 border border-slate-600 focus:border-blue-500 focus:outline-none text-sm">
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      ` : ''}
+    </div>
+
+    ${tsk ? `
+      <div class="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 overflow-hidden mb-3">
+        <div class="flex items-center justify-between px-3 py-2 bg-slate-700/50 border-b border-slate-700">
+          <span class="text-sm font-medium text-slate-300">Generated Command</span>
+          <button onclick="copyCmd()" class="flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium transition-all ${state.copied ? 'bg-green-600 text-white' : 'bg-blue-600 text-white hover:bg-blue-500'}">
+            ${state.copied ? '✓ Copied!' : '📋 Copy'}
+          </button>
+        </div>
+        <pre class="p-3 text-xs text-green-400 font-mono overflow-x-auto whitespace-pre-wrap">${esc(cmd)}</pre>
+      </div>
+    ` : ''}
+
+    <div class="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 overflow-hidden">
+      <button onclick="toggleConnect()" class="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-slate-700/30">
+        <span class="flex items-center gap-2 text-sm font-medium text-slate-300">🔗 Connection Helper</span>
+        <span class="text-slate-400">${state.showConnect ? '▲' : '▼'}</span>
+      </button>
+      ${state.showConnect ? `
+        <div class="px-3 pb-3 space-y-2">
+          ${tsk?.scopes?.length ? `
+            <div class="bg-blue-600/20 border border-blue-500/30 rounded-lg p-2">
+              <p class="text-xs text-blue-300 mb-1">Required scopes:</p>
+              <code class="text-xs text-blue-200">${tsk.scopes.join(', ')}</code>
+            </div>
+          ` : ''}
+          ${Object.entries(conns).map(([k, c]) => `
+            <div class="space-y-1">
+              <p class="text-xs text-slate-400">${c.name}</p>
+              <pre class="bg-slate-900 rounded-lg p-2 text-xs text-green-400 font-mono overflow-x-auto">${
+                k === 'graph' && tsk?.scopes?.length
+                  ? c.cmd.replace('{scopes}', tsk.scopes.join('", "'))
+                  : c.cmd.replace(/\{[^}]+\}/g, c.placeholder)
+              }</pre>
+            </div>
+          `).join('')}
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+function renderHeader() {
+  const name = getDisplayName();
+  const email = getDisplayEmail();
+  const brandName = CFG.companyName || 'M365 PowerShell';
+  return `
+    <div class="flex items-center justify-between mb-4">
+      <div class="flex items-center gap-2">
+        <span class="text-2xl">⚡</span>
+        <h1 class="text-xl font-bold text-white">${esc(brandName)} Dashboard</h1>
+      </div>
+      <div class="flex items-center gap-2">
+        <button onclick="loadConfig()" class="p-2 rounded-lg bg-slate-700 text-slate-400 hover:bg-slate-600 hover:text-white" title="Refresh commands">🔄</button>
+        <div class="flex items-center gap-2 bg-slate-800/80 rounded-lg px-3 py-1.5 border border-slate-700">
+          <div class="w-7 h-7 rounded-full bg-blue-600 flex items-center justify-center text-white text-xs font-bold">${name.charAt(0).toUpperCase()}</div>
+          <div class="hidden sm:block">
+            <p class="text-sm text-white font-medium leading-tight">${esc(name)}</p>
+            <p class="text-xs text-slate-400 leading-tight">${esc(email)}</p>
+          </div>
+          <button onclick="${manualAccount ? 'manualLogout()' : 'msalLogout()'}" class="ml-1 p-1 rounded text-slate-400 hover:text-red-400 hover:bg-slate-700" title="Sign out">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>`;
+}
+
+// =====================================================================
+// ACTIONS
+// =====================================================================
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function selectService(s) { state.service = s; state.task = ''; state.params = {}; render(); }
+function selectTask(t) { state.task = t; state.params = {}; render(); }
+function setParam(k, v) { state.params[k] = v; render(); }
+function toggleConnect() { state.showConnect = !state.showConnect; render(); }
+
+function copyCmd() {
+  const tsk = tasks[state.service]?.tasks[state.task];
+  if (!tsk) return;
+  let cmd = tsk.cmd;
+  Object.entries(state.params).forEach(([k, v]) => { cmd = cmd.replaceAll(`{${k}}`, v || `{${k}}`); });
+  navigator.clipboard.writeText(cmd);
+  state.copied = true; render();
+  setTimeout(() => { state.copied = false; render(); }, 2000);
+}
+
+// Boot
+initAuth();
+</script>
+</body>
+</html>
