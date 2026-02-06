@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>M365 PowerShell Dashboard - Admin</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; }
+    select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 0.75rem center; }
+  </style>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 p-4">
+  <div id="app" class="max-w-2xl mx-auto"></div>
+
+<script>
+// =====================================================================
+// ADMIN PASSWORD - Change this!
+// =====================================================================
+const ADMIN_PASSWORD = "admin123";
+
+// =====================================================================
+// CONNECTIONS
+// =====================================================================
+const connections = {
+  graph: { name: 'Microsoft Graph (Entra ID / Intune)', cmd: 'Connect-MgGraph -Scopes "{scopes}"', placeholder: 'User.Read.All, Group.ReadWrite.All' },
+  exchange: { name: 'Exchange Online', cmd: 'Connect-ExchangeOnline -UserPrincipalName {admin}', placeholder: 'admin@yourtenant.com' },
+  sharepoint: { name: 'SharePoint Online', cmd: 'Connect-SPOService -Url {url}', placeholder: 'https://yourtenant-admin.sharepoint.com' }
+};
+
+// =====================================================================
+// COMMANDS - Edit these or use the UI to add/edit/delete
+// =====================================================================
+let tasks = {
+  entra: {
+    name: 'Entra ID', icon: '👥',
+    tasks: {
+      listGroupMembers: { name: 'List Group Members', params: ['GroupName'], scopes: ['GroupMember.Read.All', 'User.Read.All'], cmd: `Get-MgGroupMember -GroupId (Get-MgGroup -Filter "displayName eq '{GroupName}'").Id | ForEach-Object { Get-MgUser -UserId $_.Id } | Select-Object DisplayName, UserPrincipalName, Mail` },
+      requireMFA: { name: 'Require MFA Re-registration', params: ['UserPrincipalName'], scopes: ['User.Read.All', 'User.RevokeSessions.All', 'UserAuthenticationMethod.ReadWrite.All'], cmd: `# Revoke sessions and require MFA re-registration\nRevoke-MgUserSignInSession -UserId "{UserPrincipalName}"\n\n# Reset MFA methods\nGet-MgUserAuthenticationMethod -UserId "{UserPrincipalName}" | ForEach-Object {\n  Remove-MgUserAuthenticationMethod -UserId "{UserPrincipalName}" -AuthenticationMethodId $_.Id -ErrorAction SilentlyContinue\n}` },
+      addToGroup: { name: 'Add User to Group', params: ['UserPrincipalName', 'GroupName'], scopes: ['User.Read.All', 'GroupMember.ReadWrite.All'], cmd: `$userId = (Get-MgUser -Filter "userPrincipalName eq '{UserPrincipalName}'").Id\n$groupId = (Get-MgGroup -Filter "displayName eq '{GroupName}'").Id\nNew-MgGroupMember -GroupId $groupId -DirectoryObjectId $userId` },
+      hiddenAttrs: { name: 'Get Hidden Attributes', params: ['UserPrincipalName'], scopes: ['User.Read.All'], cmd: `Get-MgUser -UserId "{UserPrincipalName}" -Property Id,DisplayName,UserPrincipalName,OnPremisesExtensionAttributes,OnPremisesSyncEnabled,OnPremisesLastSyncDateTime,OnPremisesSecurityIdentifier | Select-Object -ExpandProperty OnPremisesExtensionAttributes` }
+    }
+  },
+  intune: {
+    name: 'Intune', icon: '💻',
+    tasks: {
+      getDeviceInfo: { name: 'Get Device Info', params: ['DeviceName'], scopes: ['DeviceManagementManagedDevices.Read.All'], cmd: `Get-MgDeviceManagementManagedDevice -Filter "deviceName eq '{DeviceName}'" | Select-Object DeviceName, UserPrincipalName, OperatingSystem, OSVersion, ComplianceState, LastSyncDateTime, EnrolledDateTime, Manufacturer, Model, SerialNumber` },
+      listNonCompliant: { name: 'List Non-Compliant Devices', params: [], scopes: ['DeviceManagementManagedDevices.Read.All'], cmd: `Get-MgDeviceManagementManagedDevice -Filter "complianceState eq 'noncompliant'" | Select-Object DeviceName, UserPrincipalName, OperatingSystem, ComplianceState, LastSyncDateTime | Format-Table -AutoSize` },
+      syncDevice: { name: 'Sync Device', params: ['DeviceName'], scopes: ['DeviceManagementManagedDevices.ReadWrite.All'], cmd: `$device = Get-MgDeviceManagementManagedDevice -Filter "deviceName eq '{DeviceName}'"\nif ($device) {\n  Sync-MgDeviceManagementManagedDevice -ManagedDeviceId $device.Id\n  Write-Host "Sync initiated for $($device.DeviceName)"\n} else {\n  Write-Host "Device not found"\n}` },
+      listUserDevices: { name: 'List User Devices', params: ['UserPrincipalName'], scopes: ['DeviceManagementManagedDevices.Read.All'], cmd: `Get-MgDeviceManagementManagedDevice -Filter "userPrincipalName eq '{UserPrincipalName}'" | Select-Object DeviceName, OperatingSystem, OSVersion, ComplianceState, LastSyncDateTime, Manufacturer, Model | Format-Table -AutoSize` },
+      rebootDevice: { name: 'Reboot Device', params: ['DeviceName'], scopes: ['DeviceManagementManagedDevices.PrivilegedOperations.All'], cmd: `$device = Get-MgDeviceManagementManagedDevice -Filter "deviceName eq '{DeviceName}'"\nif ($device) {\n  Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/$($device.Id)/rebootNow"\n  Write-Host "Reboot command sent"\n} else {\n  Write-Host "Device not found"\n}` },
+      wipeDevice: { name: 'Wipe Device (Factory Reset)', params: ['DeviceName'], scopes: ['DeviceManagementManagedDevices.PrivilegedOperations.All'], cmd: `# WARNING: Factory reset!\n$device = Get-MgDeviceManagementManagedDevice -Filter "deviceName eq '{DeviceName}'"\nif ($device) {\n  $confirm = Read-Host "WIPE $($device.DeviceName)? Type YES"\n  if ($confirm -eq "YES") {\n    Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/$($device.Id)/wipe"\n    Write-Host "Wipe sent"\n  }\n}` },
+      retireDevice: { name: 'Retire Device', params: ['DeviceName'], scopes: ['DeviceManagementManagedDevices.PrivilegedOperations.All'], cmd: `# Removes company data only\n$device = Get-MgDeviceManagementManagedDevice -Filter "deviceName eq '{DeviceName}'"\nif ($device) {\n  $confirm = Read-Host "RETIRE $($device.DeviceName)? Type YES"\n  if ($confirm -eq "YES") {\n    Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/$($device.Id)/retire"\n    Write-Host "Retire sent"\n  }\n}` }
+    }
+  },
+  exchange: {
+    name: 'Exchange Online', icon: '📧',
+    tasks: {
+      listDLMembers: { name: 'List Distribution List Members', params: ['DLName'], scopes: [], cmd: `Get-DistributionGroupMember -Identity "{DLName}" | Select-Object DisplayName, PrimarySmtpAddress, RecipientType` },
+      addToDL: { name: 'Add to Distribution List', params: ['UserEmail', 'DLName'], scopes: [], cmd: `Add-DistributionGroupMember -Identity "{DLName}" -Member "{UserEmail}"` },
+      addToSharedMbx: { name: 'Add to Shared Mailbox', params: ['UserEmail', 'SharedMailbox', 'AccessType'], scopes: [], cmd: `Add-MailboxPermission -Identity "{SharedMailbox}" -User "{UserEmail}" -AccessRights {AccessType}\n# For Send As:\n# Add-RecipientPermission -Identity "{SharedMailbox}" -Trustee "{UserEmail}" -AccessRights SendAs` },
+      setArchive: { name: 'Set Archive Policy', params: ['UserEmail', 'PolicyName'], scopes: [], cmd: `Set-Mailbox -Identity "{UserEmail}" -RetentionPolicy "{PolicyName}"` }
+    }
+  },
+  sharepoint: {
+    name: 'SharePoint Online', icon: '📁',
+    tasks: {
+      getSiteInfo: { name: 'Get Site Info', params: ['SiteUrl'], scopes: [], cmd: `Get-SPOSite -Identity "{SiteUrl}" | Select-Object Title, Url, Owner, StorageUsageCurrent, StorageQuota, Template, SharingCapability` },
+      checkPerms: { name: 'Check Site Permissions', params: ['SiteUrl'], scopes: [], cmd: `Get-SPOUser -Site "{SiteUrl}" | Select-Object DisplayName, LoginName, IsSiteAdmin, Groups` }
+    }
+  }
+};
+
+// =====================================================================
+// STATE
+// =====================================================================
+let state = {
+  service: 'entra', task: '', params: {}, copied: false,
+  isAdmin: false, showLogin: false, showSettings: false,
+  showCmdModal: false, showConnect: false,
+  editMode: false, editingTask: null
+};
+
+// =====================================================================
+// RENDER
+// =====================================================================
+function render() {
+  const svc = tasks[state.service];
+  const tsk = state.task && svc ? svc.tasks[state.task] : null;
+  let cmd = '';
+  if (tsk) {
+    cmd = tsk.cmd;
+    Object.entries(state.params).forEach(([k, v]) => { cmd = cmd.replaceAll(`{${k}}`, v || `{${k}}`); });
+  }
+
+  document.getElementById('app').innerHTML = `
+    <div class="flex items-center justify-between mb-4">
+      <div class="flex items-center gap-2">
+        <span class="text-2xl">⚡</span>
+        <h1 class="text-xl font-bold text-white">M365 PowerShell Dashboard</h1>
+        <span class="text-xs bg-amber-600/20 text-amber-400 px-2 py-0.5 rounded-full border border-amber-600/30">ADMIN</span>
+      </div>
+      <div class="flex gap-2">
+        ${state.isAdmin ? `
+          <button onclick="openSettings()" class="p-2 rounded-lg bg-slate-700 text-slate-300 hover:bg-slate-600" title="Settings">⚙️</button>
+          <button onclick="adminLogout()" class="p-2 rounded-lg bg-green-600/20 text-green-400 hover:bg-green-600/30" title="Logout">🔓</button>
+        ` : `
+          <button onclick="showLogin()" class="p-2 rounded-lg bg-slate-700 text-slate-400 hover:bg-slate-600" title="Admin Login">🔒</button>
+        `}
+      </div>
+    </div>
+
+    <div class="bg-slate-800/50 backdrop-blur rounded-xl p-4 border border-slate-700 mb-3">
+      <label class="block text-sm font-medium text-slate-300 mb-2">Service</label>
+      <div class="flex gap-2 mb-4 flex-wrap">
+        ${Object.entries(tasks).map(([k, v]) => `
+          <button onclick="selectService('${k}')" class="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${state.service === k ? 'bg-blue-600 text-white shadow-lg' : 'bg-slate-700 text-slate-300 hover:bg-slate-600'}">
+            ${v.icon} ${v.name}
+          </button>
+        `).join('')}
+      </div>
+
+      <label class="block text-sm font-medium text-slate-300 mb-2">Task</label>
+      <div class="flex gap-2 mb-4">
+        <select onchange="selectTask(this.value)" class="flex-1 bg-slate-700 text-white rounded-lg px-3 py-2 appearance-none cursor-pointer border border-slate-600 focus:border-blue-500 focus:outline-none text-sm pr-10">
+          <option value="">Select a task...</option>
+          ${svc ? Object.entries(svc.tasks).map(([k, v]) => `<option value="${k}" ${state.task === k ? 'selected' : ''}>${v.name}</option>`).join('') : ''}
+        </select>
+        ${state.isAdmin ? `
+          <button onclick="openAddCmd()" class="p-2 rounded-lg bg-slate-700 text-green-400 hover:bg-slate-600" title="Add">➕</button>
+          ${tsk ? `<button onclick="openEditCmd()" class="p-2 rounded-lg bg-slate-700 text-amber-400 hover:bg-slate-600" title="Edit">✏️</button>` : ''}
+        ` : ''}
+      </div>
+
+      ${tsk && tsk.params.length > 0 ? `
+        <div class="border-t border-slate-700 pt-3">
+          <label class="block text-sm font-medium text-slate-300 mb-2">Parameters</label>
+          <div class="space-y-2">
+            ${tsk.params.map(p => `
+              <div>
+                <label class="block text-xs text-slate-400 mb-1">${p}</label>
+                <input type="text" placeholder="${p}" value="${state.params[p] || ''}" oninput="setParam('${p}', this.value)"
+                  class="w-full bg-slate-700 text-white rounded-lg px-3 py-2 border border-slate-600 focus:border-blue-500 focus:outline-none text-sm">
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      ` : ''}
+    </div>
+
+    ${tsk ? `
+      <div class="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 overflow-hidden mb-3">
+        <div class="flex items-center justify-between px-3 py-2 bg-slate-700/50 border-b border-slate-700">
+          <span class="text-sm font-medium text-slate-300">Generated Command</span>
+          <button onclick="copyCmd()" class="flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium transition-all ${state.copied ? 'bg-green-600 text-white' : 'bg-blue-600 text-white hover:bg-blue-500'}">
+            ${state.copied ? '✓ Copied!' : '📋 Copy'}
+          </button>
+        </div>
+        <pre class="p-3 text-xs text-green-400 font-mono overflow-x-auto whitespace-pre-wrap">${esc(cmd)}</pre>
+      </div>
+    ` : ''}
+
+    <div class="bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700 overflow-hidden">
+      <button onclick="toggleConnect()" class="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-slate-700/30">
+        <span class="flex items-center gap-2 text-sm font-medium text-slate-300">🔗 Connection Helper</span>
+        <span class="text-slate-400">${state.showConnect ? '▲' : '▼'}</span>
+      </button>
+      ${state.showConnect ? `
+        <div class="px-3 pb-3 space-y-2">
+          ${tsk?.scopes?.length ? `
+            <div class="bg-blue-600/20 border border-blue-500/30 rounded-lg p-2">
+              <p class="text-xs text-blue-300 mb-1">Required scopes:</p>
+              <code class="text-xs text-blue-200">${tsk.scopes.join(', ')}</code>
+            </div>
+          ` : ''}
+          ${Object.entries(connections).map(([k, c]) => `
+            <div class="space-y-1">
+              <p class="text-xs text-slate-400">${c.name}</p>
+              <pre class="bg-slate-900 rounded-lg p-2 text-xs text-green-400 font-mono overflow-x-auto">${
+                k === 'graph' && tsk?.scopes?.length
+                  ? c.cmd.replace('{scopes}', tsk.scopes.join('", "'))
+                  : c.cmd.replace(/\{[^}]+\}/g, c.placeholder)
+              }</pre>
+            </div>
+          `).join('')}
+        </div>
+      ` : ''}
+    </div>
+
+    ${!state.isAdmin ? '<p class="text-xs text-slate-500 mt-3 text-center">🔒 Admin login required to edit</p>' : ''}
+
+    ${state.showLogin ? `
+      <div class="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50" onclick="if(event.target===this)closeLogin()">
+        <div class="bg-slate-800 rounded-xl border border-slate-700 p-4 w-full max-w-sm">
+          <div class="flex justify-between items-center mb-4">
+            <h2 class="text-lg font-semibold text-white">🔑 Admin Login</h2>
+            <button onclick="closeLogin()" class="text-slate-400 hover:text-white text-xl">&times;</button>
+          </div>
+          <input type="password" id="pwdInput" placeholder="Enter password" onkeydown="if(event.key==='Enter')tryLogin()"
+            class="w-full bg-slate-700 text-white rounded-lg px-3 py-2 border border-slate-600 focus:border-blue-500 focus:outline-none mb-3">
+          <button onclick="tryLogin()" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-medium py-2 rounded-lg">Login</button>
+        </div>
+      </div>
+    ` : ''}
+
+    ${state.showCmdModal ? `
+      <div class="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50" onclick="if(event.target===this)closeCmdModal()">
+        <div class="bg-slate-800 rounded-xl border border-slate-700 p-4 w-full max-w-lg">
+          <div class="flex justify-between items-center mb-3">
+            <h2 class="text-lg font-semibold text-white">${state.editMode ? 'Edit' : 'Add'} Command</h2>
+            <button onclick="closeCmdModal()" class="text-slate-400 hover:text-white text-xl">&times;</button>
+          </div>
+          <div class="space-y-3">
+            <input type="text" id="cmdName" placeholder="Command Name" class="w-full bg-slate-700 text-white rounded-lg px-3 py-2 border border-slate-600 text-sm">
+            <input type="text" id="cmdParams" placeholder="Parameters (comma-separated)" class="w-full bg-slate-700 text-white rounded-lg px-3 py-2 border border-slate-600 text-sm">
+            <input type="text" id="cmdScopes" placeholder="Graph Scopes (optional, comma-separated)" class="w-full bg-slate-700 text-white rounded-lg px-3 py-2 border border-slate-600 text-sm">
+            <textarea id="cmdScript" placeholder="PowerShell Command (use {ParamName} for parameters)" rows="5" class="w-full bg-slate-700 text-white rounded-lg px-3 py-2 border border-slate-600 font-mono text-sm"></textarea>
+            <div class="flex gap-2">
+              <button onclick="saveCmd()" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-medium py-2 rounded-lg text-sm">💾 Save</button>
+              ${state.editMode ? `<button onclick="deleteCmd()" class="px-4 py-2 bg-red-600/20 hover:bg-red-600/40 text-red-400 rounded-lg text-sm">Delete</button>` : ''}
+            </div>
+          </div>
+        </div>
+      </div>
+    ` : ''}
+
+    ${state.showSettings ? `
+      <div class="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50" onclick="if(event.target===this)closeSettings()">
+        <div class="bg-slate-800 rounded-xl border border-slate-700 p-4 w-full max-w-lg max-h-[80vh] overflow-y-auto">
+          <div class="flex justify-between items-center mb-4">
+            <h2 class="text-lg font-semibold text-white">⚙️ Admin Settings</h2>
+            <button onclick="closeSettings()" class="text-slate-400 hover:text-white text-xl">&times;</button>
+          </div>
+          <div class="bg-green-600/20 border border-green-500/30 rounded-lg p-3 mb-4">
+            <p class="text-sm text-green-300 mb-2">Export config to update commands.json:</p>
+            <button onclick="exportConfig()" class="w-full bg-green-600 hover:bg-green-500 text-white font-medium py-2 rounded-lg text-sm">📥 Export Config (JSON)</button>
+          </div>
+          <div class="bg-blue-600/20 border border-blue-500/30 rounded-lg p-3 mb-4">
+            <p class="text-sm text-blue-300 mb-2">Import config from commands.json:</p>
+            <input type="file" id="importFile" accept=".json" onchange="importConfig(event)" class="w-full text-sm text-slate-300">
+          </div>
+          <div class="bg-slate-700/50 rounded-lg p-3 mb-4">
+            <h3 class="text-sm font-medium text-slate-300 mb-2">Add Service</h3>
+            <div class="flex gap-2">
+              <input type="text" id="newSvcName" placeholder="Service name" class="flex-1 bg-slate-700 text-white rounded-lg px-3 py-2 border border-slate-600 text-sm">
+              <button onclick="addService()" class="px-3 py-2 rounded-lg bg-green-600 hover:bg-green-500 text-white text-sm">Add</button>
+            </div>
+          </div>
+          <div class="space-y-2">
+            ${Object.entries(tasks).map(([k, v]) => `
+              <div class="bg-slate-700/50 rounded-lg p-2 flex items-center justify-between">
+                <span class="text-white text-sm">${v.icon} ${v.name} <span class="text-slate-500">(${Object.keys(v.tasks).length})</span></span>
+                <button onclick="deleteService('${k}')" class="p-1 text-slate-400 hover:text-red-400 ${Object.keys(tasks).length <= 1 ? 'opacity-30' : ''}">🗑️</button>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      </div>
+    ` : ''}
+  `;
+}
+
+// =====================================================================
+// ACTIONS
+// =====================================================================
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function selectService(s) { state.service = s; state.task = ''; state.params = {}; render(); }
+function selectTask(t) { state.task = t; state.params = {}; render(); }
+function setParam(k, v) { state.params[k] = v; render(); }
+function toggleConnect() { state.showConnect = !state.showConnect; render(); }
+
+function copyCmd() {
+  const tsk = tasks[state.service]?.tasks[state.task];
+  if (!tsk) return;
+  let cmd = tsk.cmd;
+  Object.entries(state.params).forEach(([k, v]) => { cmd = cmd.replaceAll(`{${k}}`, v || `{${k}}`); });
+  navigator.clipboard.writeText(cmd);
+  state.copied = true; render();
+  setTimeout(() => { state.copied = false; render(); }, 2000);
+}
+
+// Admin
+function showLogin() { state.showLogin = true; render(); setTimeout(() => document.getElementById('pwdInput')?.focus(), 50); }
+function closeLogin() { state.showLogin = false; render(); }
+function tryLogin() {
+  if (document.getElementById('pwdInput').value === ADMIN_PASSWORD) {
+    state.isAdmin = true; state.showLogin = false;
+  } else { alert('Incorrect password'); }
+  render();
+}
+function adminLogout() { state.isAdmin = false; state.showSettings = false; render(); }
+
+function openSettings() { state.showSettings = true; render(); }
+function closeSettings() { state.showSettings = false; render(); }
+
+function openAddCmd() { state.showCmdModal = true; state.editMode = false; state.editingTask = null; render(); }
+function openEditCmd() {
+  const tsk = tasks[state.service]?.tasks[state.task];
+  if (!tsk) return;
+  state.showCmdModal = true; state.editMode = true; state.editingTask = state.task; render();
+  setTimeout(() => {
+    document.getElementById('cmdName').value = tsk.name;
+    document.getElementById('cmdParams').value = tsk.params.join(', ');
+    document.getElementById('cmdScopes').value = (tsk.scopes || []).join(', ');
+    document.getElementById('cmdScript').value = tsk.cmd;
+  }, 50);
+}
+function closeCmdModal() { state.showCmdModal = false; render(); }
+
+function saveCmd() {
+  const name = document.getElementById('cmdName').value.trim();
+  const cmd = document.getElementById('cmdScript').value.trim();
+  if (!name || !cmd) { alert('Name and command are required'); return; }
+  const params = document.getElementById('cmdParams').value.split(',').map(p => p.trim()).filter(Boolean);
+  const scopes = document.getElementById('cmdScopes').value.split(',').map(s => s.trim()).filter(Boolean);
+  const id = state.editMode ? state.editingTask : 'cmd_' + Date.now();
+  tasks[state.service].tasks[id] = { name, params, scopes, cmd };
+  state.task = id; state.showCmdModal = false; render();
+}
+
+function deleteCmd() {
+  if (!confirm('Delete this command?')) return;
+  delete tasks[state.service].tasks[state.task];
+  state.task = ''; state.showCmdModal = false; render();
+}
+
+function addService() {
+  const name = document.getElementById('newSvcName').value.trim();
+  if (!name) return;
+  const icons = ['📧','🛠️','📊','🖥️','☁️','📁'];
+  tasks['svc_' + Date.now()] = { name, icon: icons[Math.floor(Math.random()*icons.length)], tasks: {} };
+  document.getElementById('newSvcName').value = ''; render();
+}
+
+function deleteService(k) {
+  if (Object.keys(tasks).length <= 1) return;
+  if (!confirm(`Delete "${tasks[k].name}"?`)) return;
+  delete tasks[k];
+  if (state.service === k) state.service = Object.keys(tasks)[0];
+  render();
+}
+
+function exportConfig() {
+  const blob = new Blob([JSON.stringify({ connections, tasks }, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'commands.json'; a.click();
+}
+
+function importConfig(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const cfg = JSON.parse(e.target.result);
+      if (cfg.tasks) {
+        tasks = cfg.tasks;
+        state.service = Object.keys(tasks)[0] || '';
+        state.task = '';
+        state.params = {};
+        render();
+        alert('Config imported successfully!');
+      } else { alert('Invalid config: missing "tasks" key'); }
+    } catch (err) { alert('Invalid JSON file'); }
+  };
+  reader.readAsText(file);
+}
+
+// Boot
+render();
+</script>
+</body>
+</html>

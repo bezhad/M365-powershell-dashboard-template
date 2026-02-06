@@ -1,0 +1,147 @@
+{
+  "connections": {
+    "graph": {
+      "name": "Microsoft Graph (Entra ID / Intune)",
+      "cmd": "Connect-MgGraph -Scopes \"{scopes}\"",
+      "placeholder": "User.Read.All, Group.ReadWrite.All"
+    },
+    "exchange": {
+      "name": "Exchange Online",
+      "cmd": "Connect-ExchangeOnline -UserPrincipalName {admin}",
+      "placeholder": "admin@yourtenant.com"
+    },
+    "sharepoint": {
+      "name": "SharePoint Online",
+      "cmd": "Connect-SPOService -Url {url}",
+      "placeholder": "https://yourtenant-admin.sharepoint.com"
+    }
+  },
+  "tasks": {
+    "entra": {
+      "name": "Entra ID",
+      "icon": "👥",
+      "tasks": {
+        "listGroupMembers": {
+          "name": "List Group Members",
+          "params": ["GroupName"],
+          "scopes": ["GroupMember.Read.All", "User.Read.All"],
+          "cmd": "Get-MgGroupMember -GroupId (Get-MgGroup -Filter \"displayName eq '{GroupName}'\").Id | ForEach-Object { Get-MgUser -UserId $_.Id } | Select-Object DisplayName, UserPrincipalName, Mail"
+        },
+        "requireMFA": {
+          "name": "Require MFA Re-registration",
+          "params": ["UserPrincipalName"],
+          "scopes": ["User.Read.All", "User.RevokeSessions.All", "UserAuthenticationMethod.ReadWrite.All"],
+          "cmd": "# Revoke sessions and require MFA re-registration\nRevoke-MgUserSignInSession -UserId \"{UserPrincipalName}\"\n\n# Reset MFA methods\nGet-MgUserAuthenticationMethod -UserId \"{UserPrincipalName}\" | ForEach-Object {\n  Remove-MgUserAuthenticationMethod -UserId \"{UserPrincipalName}\" -AuthenticationMethodId $_.Id -ErrorAction SilentlyContinue\n}"
+        },
+        "addToGroup": {
+          "name": "Add User to Group",
+          "params": ["UserPrincipalName", "GroupName"],
+          "scopes": ["User.Read.All", "GroupMember.ReadWrite.All"],
+          "cmd": "$userId = (Get-MgUser -Filter \"userPrincipalName eq '{UserPrincipalName}'\").Id\n$groupId = (Get-MgGroup -Filter \"displayName eq '{GroupName}'\").Id\nNew-MgGroupMember -GroupId $groupId -DirectoryObjectId $userId"
+        },
+        "hiddenAttrs": {
+          "name": "Get Hidden Attributes",
+          "params": ["UserPrincipalName"],
+          "scopes": ["User.Read.All"],
+          "cmd": "Get-MgUser -UserId \"{UserPrincipalName}\" -Property Id,DisplayName,UserPrincipalName,OnPremisesExtensionAttributes,OnPremisesSyncEnabled,OnPremisesLastSyncDateTime,OnPremisesSecurityIdentifier | Select-Object -ExpandProperty OnPremisesExtensionAttributes"
+        }
+      }
+    },
+    "intune": {
+      "name": "Intune",
+      "icon": "💻",
+      "tasks": {
+        "getDeviceInfo": {
+          "name": "Get Device Info",
+          "params": ["DeviceName"],
+          "scopes": ["DeviceManagementManagedDevices.Read.All"],
+          "cmd": "Get-MgDeviceManagementManagedDevice -Filter \"deviceName eq '{DeviceName}'\" | Select-Object DeviceName, UserPrincipalName, OperatingSystem, OSVersion, ComplianceState, LastSyncDateTime, EnrolledDateTime, Manufacturer, Model, SerialNumber"
+        },
+        "listNonCompliant": {
+          "name": "List Non-Compliant Devices",
+          "params": [],
+          "scopes": ["DeviceManagementManagedDevices.Read.All"],
+          "cmd": "Get-MgDeviceManagementManagedDevice -Filter \"complianceState eq 'noncompliant'\" | Select-Object DeviceName, UserPrincipalName, OperatingSystem, ComplianceState, LastSyncDateTime | Format-Table -AutoSize"
+        },
+        "syncDevice": {
+          "name": "Sync Device",
+          "params": ["DeviceName"],
+          "scopes": ["DeviceManagementManagedDevices.ReadWrite.All"],
+          "cmd": "$device = Get-MgDeviceManagementManagedDevice -Filter \"deviceName eq '{DeviceName}'\"\nif ($device) {\n  Sync-MgDeviceManagementManagedDevice -ManagedDeviceId $device.Id\n  Write-Host \"Sync initiated for $($device.DeviceName)\"\n} else {\n  Write-Host \"Device not found\"\n}"
+        },
+        "listUserDevices": {
+          "name": "List User Devices",
+          "params": ["UserPrincipalName"],
+          "scopes": ["DeviceManagementManagedDevices.Read.All"],
+          "cmd": "Get-MgDeviceManagementManagedDevice -Filter \"userPrincipalName eq '{UserPrincipalName}'\" | Select-Object DeviceName, OperatingSystem, OSVersion, ComplianceState, LastSyncDateTime, Manufacturer, Model | Format-Table -AutoSize"
+        },
+        "rebootDevice": {
+          "name": "Reboot Device",
+          "params": ["DeviceName"],
+          "scopes": ["DeviceManagementManagedDevices.PrivilegedOperations.All"],
+          "cmd": "$device = Get-MgDeviceManagementManagedDevice -Filter \"deviceName eq '{DeviceName}'\"\nif ($device) {\n  Invoke-MgGraphRequest -Method POST -Uri \"https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/$($device.Id)/rebootNow\"\n  Write-Host \"Reboot command sent\"\n} else {\n  Write-Host \"Device not found\"\n}"
+        },
+        "wipeDevice": {
+          "name": "Wipe Device (Factory Reset)",
+          "params": ["DeviceName"],
+          "scopes": ["DeviceManagementManagedDevices.PrivilegedOperations.All"],
+          "cmd": "# WARNING: Factory reset!\n$device = Get-MgDeviceManagementManagedDevice -Filter \"deviceName eq '{DeviceName}'\"\nif ($device) {\n  $confirm = Read-Host \"WIPE $($device.DeviceName)? Type YES\"\n  if ($confirm -eq \"YES\") {\n    Invoke-MgGraphRequest -Method POST -Uri \"https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/$($device.Id)/wipe\"\n    Write-Host \"Wipe sent\"\n  }\n}"
+        },
+        "retireDevice": {
+          "name": "Retire Device",
+          "params": ["DeviceName"],
+          "scopes": ["DeviceManagementManagedDevices.PrivilegedOperations.All"],
+          "cmd": "# Removes company data only\n$device = Get-MgDeviceManagementManagedDevice -Filter \"deviceName eq '{DeviceName}'\"\nif ($device) {\n  $confirm = Read-Host \"RETIRE $($device.DeviceName)? Type YES\"\n  if ($confirm -eq \"YES\") {\n    Invoke-MgGraphRequest -Method POST -Uri \"https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/$($device.Id)/retire\"\n    Write-Host \"Retire sent\"\n  }\n}"
+        }
+      }
+    },
+    "exchange": {
+      "name": "Exchange Online",
+      "icon": "📧",
+      "tasks": {
+        "listDLMembers": {
+          "name": "List Distribution List Members",
+          "params": ["DLName"],
+          "scopes": [],
+          "cmd": "Get-DistributionGroupMember -Identity \"{DLName}\" | Select-Object DisplayName, PrimarySmtpAddress, RecipientType"
+        },
+        "addToDL": {
+          "name": "Add to Distribution List",
+          "params": ["UserEmail", "DLName"],
+          "scopes": [],
+          "cmd": "Add-DistributionGroupMember -Identity \"{DLName}\" -Member \"{UserEmail}\""
+        },
+        "addToSharedMbx": {
+          "name": "Add to Shared Mailbox",
+          "params": ["UserEmail", "SharedMailbox", "AccessType"],
+          "scopes": [],
+          "cmd": "Add-MailboxPermission -Identity \"{SharedMailbox}\" -User \"{UserEmail}\" -AccessRights {AccessType}\n# For Send As:\n# Add-RecipientPermission -Identity \"{SharedMailbox}\" -Trustee \"{UserEmail}\" -AccessRights SendAs"
+        },
+        "setArchive": {
+          "name": "Set Archive Policy",
+          "params": ["UserEmail", "PolicyName"],
+          "scopes": [],
+          "cmd": "Set-Mailbox -Identity \"{UserEmail}\" -RetentionPolicy \"{PolicyName}\""
+        }
+      }
+    },
+    "sharepoint": {
+      "name": "SharePoint Online",
+      "icon": "📁",
+      "tasks": {
+        "getSiteInfo": {
+          "name": "Get Site Info",
+          "params": ["SiteUrl"],
+          "scopes": [],
+          "cmd": "Get-SPOSite -Identity \"{SiteUrl}\" | Select-Object Title, Url, Owner, StorageUsageCurrent, StorageQuota, Template, SharingCapability"
+        },
+        "checkPerms": {
+          "name": "Check Site Permissions",
+          "params": ["SiteUrl"],
+          "scopes": [],
+          "cmd": "Get-SPOUser -Site \"{SiteUrl}\" | Select-Object DisplayName, LoginName, IsSiteAdmin, Groups"
+        }
+      }
+    }
+  }
+}
