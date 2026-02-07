@@ -1,6 +1,6 @@
 # M365 PowerShell Dashboard
 
-A read-only PowerShell command generator for Microsoft 365 administration with Microsoft SSO authentication. Users sign in with their work account, pick a task, fill in parameters, and copy the generated command.
+A self hosted, read-only PowerShell command generator for Microsoft 365 administration with Microsoft SSO authentication. Users sign in with their work account, pick a task, fill in parameters, and copy the generated command.
 
 ## Repository Structure
 
